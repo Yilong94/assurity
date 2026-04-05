@@ -37,7 +37,7 @@ Periodically probes HTTP endpoints, stores results in PostgreSQL, exposes status
 
 ### Optional — mock server for probe target and webhook
 
-You can optionally start a small helper in a **second terminal** to play around with the availability checker:
+You can optionally start a small helper in a **second terminal** to test the probe and alert features of the availability checker:
 
 ```bash
 go run ./mock
