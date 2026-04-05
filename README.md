@@ -1,83 +1,139 @@
 # Uptime availability checker
 
-The stack consists of:
+Periodically probes HTTP endpoints, stores results in PostgreSQL, exposes status via a small API and dashboard, and optionally alerts on downtime via webhook.
 
-- **Scheduler** — reads `config/services.yaml`, upserts per-site **check interval**, **HTTP timeout**, and **retry** settings into PostgreSQL, then enqueues a ping job to **AWS SQS** whenever each site’s interval has elapsed since the last enqueue.
-- **Worker(s)** — long-poll **SQS** (`ReceiveMessage`), run an HTTP GET using that site’s **timeout** and **retries** (extra attempts after a failed request), record **up** / **down**, **latency**, and optional **error** in `probe_results`, then **delete** the message on success. Failed processing leaves the message invisible until the visibility timeout expires, then it is retried (at-least-once delivery).
-- **API** — serves `GET /api/v1/status` (latest row per service) and a small HTML dashboard at `/`.
-- **PostgreSQL** — stores services and ping history.
-- **SQS** — decouples scheduling from execution; scale workers independently. In Docker Compose, **LocalStack** provides a compatible SQS API for local testing.
+## Quickstart
 
-### Architecture (DDD / hexagonal)
+### Prerequisites
 
-The layout uses **dependency injection via interfaces** (ports) so the core stays independent of PostgreSQL, SQS, YAML, and HTTP details:
+- **Docker** with **Docker Compose** v2 (`docker compose`, not only `docker-compose`)
+
+### Run everything locally
+
+1. Clone this repository and open a terminal in the project root.
+
+2. Start the stack (builds images and starts API, scheduler, worker, Postgres, LocalStack):
+
+   ```bash
+   docker compose up --build
+   ```
+
+3. Wait until containers are healthy (first run can take **1–2 minutes** while Postgres and LocalStack become ready).
+
+4. Open the app:
+
+   | What | URL |
+   |------|-----|
+   | **Dashboard** | [http://localhost:8080](http://localhost:8080) |
+   | **JSON API** | [http://localhost:8080/api/v1/status](http://localhost:8080/api/v1/status) |
+
+5. **Optional — check the API from the shell:**
+
+   ```bash
+   curl -s http://localhost:8080/api/v1/status | head
+   ```
+
+### Optional — mock server for probe target and webhook
+
+You can optionally start a small helper in a **second terminal** to play around with the availability checker:
+
+```bash
+go run ./mock
+```
+
+This listens on **port 8081**: **`/`** is a fake HTTP endpoint the worker can probe, and **`POST /webhook`** prints JSON alert payloads to the console. In `mock/main.go` you can switch the response to **503** and tune artificial **latency** to simulate failures and slow responses.
+
+### How to add a new service to monitor
+
+- Edit **`config/services.yaml`** (each service needs a unique `name` and an `endpoint` URL).
+- The scheduler mounts `./config` read-only; **you do not need to rebuild** the image for YAML-only changes. Updates are picked up on the next **`SCHEDULER_TICK`** (default **5s**), or restart the scheduler: `docker compose restart scheduler`.
+
+## Design Overview
+
+![Architecture overview](assets/images/architecture.png)
+
+### Runtime flow
+
+1. **Scheduling** — The scheduler loads config on each tick, selects services that are due, and sends **one SQS message per service** (`ProbeJob` with `service_id`).
+3. **Execution** — Workers long-poll SQS, gets the service definition from the DB, **HTTP GET** the endpoint (with timeout and retries), insert into `probe_results`, optionally **POST** to `ALERT_WEBHOOK_URL` on **down**, then **delete** the message. Failed handling relies on the visibility timeout for retries (**at-least-once** delivery).
+4. **Dashboarding** — The API serves the latest result per service on the dashboard and `GET /api/v1/status`.
+
+### Components
+
+| Part | Responsibility |
+|------|----------------|
+| **Scheduler** | Load `config/services.yaml`, upsert services, enqueue due jobs to SQS. |
+| **Worker** | Consume jobs, run the HTTP probe, persist results, optional webhook, ack by deleting the message. |
+| **API** | Expose JSON status and the HTML dashboard. |
+| **PostgreSQL** | Services table + `probe_results` history. |
+| **SQS** | Buffer between scheduler and workers (LocalStack in Docker Compose). |
+
+### Code layout (hexagonal)
+
+`internal/domain` and `internal/application` hold behavior and **ports**; `internal/adapters` implement Postgres, SQS, YAML, HTTP probe, and webhook; `cmd/*` is the composition root. That keeps core logic testable and swappable (e.g. AWS vs LocalStack).
 
 | Layer | Package | Role |
 |-------|---------|------|
-| **Domain** | `internal/domain` | Entities and value objects (`ServiceDefinition`, `ProbeResult`, `ProbeJob`). **Ports** live in `internal/domain/ports`: `ServiceRepository`, `JobQueue`, `AvailabilityProbe`, `ServiceLoader`, `DownNotifier`, `LatestStatusReader`. |
-| **Application** | `internal/application` | Use cases: `SchedulerService`, `WorkerService`, `ListLatestServiceStatuses` — depend only on ports, not adapters. |
-| **Adapters** | `internal/adapters/...` | **Driving:** YAML catalog loader. **Driven:** PostgreSQL repository, SQS queue client, HTTP availability probe, optional webhook alerter. |
-| **Composition** | `cmd/*` | Wires concrete adapters into application services (composition root). |
+| **Domain** | `internal/domain` | Entities (`ServiceDefinition`, `ProbeResult`, `ProbeJob`). **Ports:** `ServiceRepository`, `JobQueue`, `AvailabilityProbe`, `ServiceLoader`, `DownNotifier`, `LatestStatusReader`. |
+| **Application** | `internal/application` | `SchedulerService`, `WorkerService`, `StatusService`. |
+| **Adapters** | `internal/adapters/...` | YAML loader; Postgres, SQS, HTTP probe, webhook. |
+| **Composition** | `cmd/*` | Wire concrete adapters. |
 
-## Run with Docker Compose
+### `config/services.yaml`
 
-```bash
-docker compose up --build
-```
-
-- Dashboard: [http://localhost:8080](http://localhost:8080)
-- JSON: [http://localhost:8080/api/v1/status](http://localhost:8080/api/v1/status)
-
-LocalStack SQS is on port **4566**. The `sqs-init` service creates the queue `uptime-ping-jobs` before workers and the scheduler start.
-
-Scale workers (example: three replicas):
-
-```bash
-docker compose up --build --scale worker=3
-```
-
-### Environment variables
-
-| Variable | Used by | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | all | PostgreSQL DSN |
-| `SQS_QUEUE_URL` | scheduler, worker | Full queue URL from AWS or LocalStack |
-| `AWS_REGION` / `AWS_DEFAULT_REGION` | scheduler, worker | AWS region (default `us-east-1`) |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | scheduler, worker | Credentials (use real IAM keys in AWS; `test`/`test` for LocalStack) |
-| `AWS_ENDPOINT_URL` or `SQS_ENDPOINT` | scheduler, worker | Optional custom SQS API endpoint (e.g. `http://localstack:4566`) |
-| `SQS_VISIBILITY_TIMEOUT` | worker | Seconds (default `60`). Must exceed worst-case work time: roughly **(1 + retries) × timeout** per attempt plus small backoffs—raise this if you increase `retries` or `timeout` in YAML |
-| `SQS_WAIT_TIME_SECONDS` | worker | Long-poll wait (default `20`; max `20`) |
-| `ALERT_WEBHOOK_URL` | worker | Optional. If set, the worker **POST**s JSON to this URL on every **down** probe (after the result is stored). |
-| `CONFIG_PATH` | scheduler | Path to YAML config (default `/config/services.yaml` in Compose) |
-| `SCHEDULER_TICK` | scheduler | How often the scheduler wakes to reload config and enqueue due jobs (default `5s`) |
-| `HTTP_ADDR` | api | Listen address (default `:8080`) |
-
-### Configuration file
-
-Edit `config/services.yaml`. Each service needs a unique `name` and an HTTP(S) `endpoint`.
-
-Optional per site:
+Each service needs a unique `name` and an HTTP(S) `endpoint`.
 
 | Field | Meaning | Default |
 |-------|---------|---------|
-| `interval` | Minimum time between enqueueing checks for this site (Go duration: `30s`, `1m`, …) | `30s` |
+| `interval` | Minimum time between enqueueing checks (Go duration, e.g. `30s`, `1m`) | `30s` |
 | `timeout` | Per-request HTTP timeout for each attempt | `15s` |
-| `retries` | Number of **extra** HTTP attempts after the first failure (integer `0`–`20`) | `0` |
+| `retries` | **Extra** HTTP attempts after the first failure (`0`–`20`) | `0` |
 
-The scheduler stores these in PostgreSQL and only enqueues when `interval` has passed since the last enqueue for that service.
+The scheduler persists these fields and only enqueues when `interval` has elapsed since `last_enqueued_at`.
 
-### Production (AWS)
+### Trade-offs
 
-Create an SQS queue in your account, set `SQS_QUEUE_URL` to the queue URL from the console or CLI, **omit** `AWS_ENDPOINT_URL`, and use IAM roles or environment credentials. Tune `SQS_VISIBILITY_TIMEOUT` to cover the longest possible single job: multiple retries each using `timeout`, plus short delays between retries.
+| Decision | Benefit | Cost |
+|----------|---------|------|
+| **SQS between scheduler and workers** | Scale workers independently; buffer spikes; retries via visibility timeout | **At-least-once** delivery — duplicates possible; re-probing the same service must be acceptable. |
+| **YAML on disk (`CONFIG_PATH`)** | Simple, Git-reviewable | No self-serve UI; production must supply the file (mount, EFS, init fetch, etc.). |
+| **`SCHEDULER_TICK` loop** | Easy to implement and reason about | Not sub-second scheduling precision. |
+| **Webhook on every down** | Small surface area, generic HTTP integration | Can be noisy; no “only on transition” or cooldown in v1. |
+| **Postgres for catalog + history** | One database, relational queries | High-volume history may need retention or archival later. |
+| **Embedded HTML dashboard** | No front-end build | Basic UX vs a full SPA. |
 
-## Local build (without Docker)
+## Infrastructure/Deployment
 
-```bash
-go build -o bin/api ./cmd/api
-go build -o bin/worker ./cmd/worker
-go build -o bin/scheduler ./cmd/scheduler
-```
+### Infrastructure
 
-You need PostgreSQL, an SQS API (AWS or LocalStack), and the same environment variables as above.
+The scheduler, worker, and API are packaged as separate Docker images and deployed on Kubernetes (EKS) to enable independent scaling, rolling updates, and automatic recovery from failures. Images are stored in ECR and infrastructure can be provisioned using Terraform or CloudFormation.
 
-![alt text](<assets/images/architecture.png>)
+PostgreSQL runs on Amazon RDS (Multi-AZ) for durability and managed backups. SQS decouples the scheduler from workers and smooths traffic spikes. Service definitions can be stored in PostgreSQL initially and optionally moved to S3 later for simpler configuration management.
+
+Services run in private subnets, with the API exposed via an Application Load Balancer. IAM roles and Secrets Manager handle credentials securely. Liveness and readiness probes ensure service health within the cluster.
+
+### Monitoring
+
+Infrastructure metrics (CPU, memory, pod restarts, SQS depth, API latency, DB connections) are collected via Prometheus + Grafana.
+
+Business metrics include probe success rate, probe latency, worker throughput, and failure counts. Structured logs are centralized in Grafana as well.
+
+Alerting is configured for probe failures above thresholds, queue/DLQ backlog growth, API errors, and database health issues.
+
+## Screenshots
+
+### Mock endpoint with `Up` status
+
+![alt text](assets/images/mock-endpoint-up.png)
+
+### Mock endpoint with `Up` status and high latency
+
+![alt text](assets/images/mock-endpoint-up-with-high-latency.png)
+
+### Mock endpoint with `Down` status
+
+![alt text](assets/images/mock-endpoint-down.png)
+
+### Alerts triggered on webhook
+
+![alt text](assets/images/alerts-on-webhook.png)
