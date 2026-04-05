@@ -1,0 +1,37 @@
+# VCS
+.git
+.gitignore
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# This file
+.dockerignore
+
+# Local env and secrets (never bake into an image)
+.env
+.env.*
+config/*.local.yaml
+
+# Compose is for host orchestration; not used inside the image build
+docker-compose.yml
+docker-compose.override.yml
+
+# Docs — not compiled
+README.md
+
+# Dev-only tree (not imported by cmd/api, worker, scheduler)
+mock/
+
+# Config is mounted at runtime in compose (./config:/config). Excluding it keeps
+# YAML edits from invalidating the COPY . . layer and shrinking the context.
+config/
+
+# Local build artifacts
+bin/
+dist/
+*.exe
+*.test
+coverage.out

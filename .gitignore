@@ -1,0 +1,38 @@
+# Build outputs
+/bin/
+/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Dependency vendoring (uncomment if you use `go mod vendor` and do not commit vendor/)
+# vendor/
+
+# Local env and secrets (never commit)
+.env
+.env.*
+!.env.example
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and temp
+*.log
+tmp/
+temp/
+
+# Optional: local Compose overrides (uncomment if each dev has their own)
+# docker-compose.override.yml

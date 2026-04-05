@@ -1,0 +1,29 @@
+# Per-site settings (all optional):
+#   interval — how often to enqueue a check for this service (Go duration, e.g. 30s, 2m). Default 30s.
+#   timeout  — HTTP client timeout per request attempt. Default 15s.
+#   retries  — extra HTTP attempts after the first failure (0 = one attempt only). Default 0. Max 20.
+
+services:
+  - name: Google
+    endpoint: https://www.google.com
+    interval: 60s
+    timeout: 10s
+    retries: 1
+
+  - name: Good endpoint
+    endpoint: https://httpbin.org/status/200
+    interval: 45s
+    timeout: 12s
+    retries: 2
+
+  - name: Bad endpoint
+    endpoint: https://httpbin.org/status/503
+    interval: 90s
+    timeout: 8s
+    retries: 0
+
+  - name: Mock endpoint
+    endpoint: http://host.docker.internal:8081
+    interval: 10s
+    timeout: 5s
+    retries: 3
