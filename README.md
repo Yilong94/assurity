@@ -2,6 +2,8 @@
 
 Periodically probes HTTP endpoints, stores results in PostgreSQL, exposes status via a small API and dashboard, and optionally alerts on downtime via webhook.
 
+![alt text](<assets/images/cover-image.png>)
+
 ## Quickstart
 
 ### Prerequisites
